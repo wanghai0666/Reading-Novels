@@ -2,77 +2,151 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>EPUB Reader (epub.js)</title>
+  <title>EPUB Reader (epub.js) - 修复版</title>
   <style>
     html,body { height:100%; margin:0; font-family: Arial, sans-serif; }
     #controls { padding:8px; background:#f2f2f2; display:flex; gap:8px; align-items:center; }
-    #viewer { height: calc(100% - 50px); }
+    #viewer { height: calc(100% - 56px); border-top:1px solid #ddd; }
     button { padding:6px 10px; }
+    #status { margin-left:8px; color:#666; }
+    #tocList { max-height:300px; overflow:auto; font-size:14px; margin-left:8px; }
   </style>
-  <script src="https://unpkg.com/epubjs/dist/epub.min.js"></script>
+  <!-- 使用 jsDelivr CDN 的 epub.js（0.3.x 系列），如需离线可下载库并本地引用 -->
+  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.88/dist/epub.min.js"></script>
 </head>
 <body>
   <div id="controls">
     <input id="file" type="file" accept=".epub" />
     <button id="prev" disabled>上一页</button>
     <button id="next" disabled>下一页</button>
-    <button id="tocBtn" disabled>目录</button>
-    <label><input id="night" type="checkbox"> 夜间模式</label>
+    <button id="tocBtn" disabled>显示/隐藏目录</button>
+    <label style="margin-left:8px"><input id="night" type="checkbox"> 夜间模式</label>
     <span id="status"></span>
   </div>
+
   <div id="viewer"></div>
+  <div id="tocList" style="display:none; padding:8px; background:#fff; border-top:1px solid #ddd"></div>
 
   <script>
-    let book, rendition;
+    let book = null, rendition = null, toc = null;
     const fileInput = document.getElementById('file');
     const prevBtn = document.getElementById('prev');
     const nextBtn = document.getElementById('next');
     const tocBtn = document.getElementById('tocBtn');
     const status = document.getElementById('status');
     const night = document.getElementById('night');
+    const tocList = document.getElementById('tocList');
 
-    fileInput.addEventListener('change', (e) => {
+    function setStatus(msg, isError=false) {
+      status.textContent = msg || '';
+      status.style.color = isError ? 'crimson' : '#666';
+      console.log('[EPUB]', msg);
+    }
+
+    fileInput.addEventListener('change', async (e) => {
       const f = e.target.files[0];
       if (!f) return;
-      const url = URL.createObjectURL(f);
-      openBook(url);
+      // 清理上一本
+      if (rendition) {
+        try { rendition.destroy(); } catch (err) {}
+        rendition = null;
+      }
+      if (book) {
+        try { book.destroy && book.destroy(); } catch (e) {}
+        book = null;
+      }
+      setStatus('正在读取文件...');
+      // 使用 FileReader 读取 ArrayBuffer，兼容性更好
+      const reader = new FileReader();
+      reader.onerror = () => setStatus('无法读取文件（FileReader 错误）', true);
+      reader.onload = async () => {
+        const arrayBuffer = reader.result;
+        try {
+          setStatus('正在解析 EPUB...');
+          // epub.js 接受 ArrayBuffer / Blob / URL
+          book = ePub(arrayBuffer);
+          // 渲染
+          rendition = book.renderTo('viewer', {
+            width: "100%",
+            height: "100%",
+            flow: "paginated" // 分页模式
+          });
+          // 夜间主题
+          rendition.themes.register("night", {
+            "body": { "background": "#0b0b0b", "color": "#e6e6e6" },
+            "img": { "max-width": "100%" }
+          });
+          // 加载完成后显示
+          await rendition.display();
+          setStatus('');
+          prevBtn.disabled = false;
+          nextBtn.disabled = false;
+          tocBtn.disabled = false;
+
+          // 加载目录（navigation）和 metadata
+          try {
+            const nav = await book.loaded.navigation;
+            toc = nav && nav.toc ? nav.toc : null;
+            if (toc && toc.length) buildTocList(toc);
+          } catch (err) {
+            console.warn('无法读取目录', err);
+          }
+
+          // 监听位置变更（更新进度）
+          book.on('renderer:locationChanged', (location) => {
+            // location 对象可能包含 start/end CFI，可扩展为保存书签
+            // console.log('位置变化', location);
+          });
+
+        } catch (err) {
+          console.error(err);
+          setStatus('解析 EPUB 时出错：' + (err.message || err), true);
+        }
+      };
+      reader.readAsArrayBuffer(f);
     });
 
-    function openBook(url) {
-      if (rendition) rendition.destroy();
-      book = ePub(url);
-      status.textContent = '正在加载...';
-      rendition = book.renderTo("viewer", { width: "100%", height: "100%" });
-      rendition.themes.register("night", {
-        "body": { "background": "#111", "color": "#ddd" }
-      });
-      rendition.display().then(() => {
-        status.textContent = '';
-        prevBtn.disabled = false;
-        nextBtn.disabled = false;
-        tocBtn.disabled = false;
-      });
-      // update location
-      book.on("renderer:locationChanged", (loc) => {
-        // optional: update progress or URL hash
+    function buildTocList(toc) {
+      tocList.innerHTML = '';
+      toc.forEach((item, i) => {
+        const a = document.createElement('a');
+        a.href = '#';
+        a.style.display = 'block';
+        a.style.padding = '4px 0';
+        a.textContent = (i+1) + '. ' + (item.label || item.href);
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          if (rendition) rendition.display(item.href);
+        });
+        tocList.appendChild(a);
       });
     }
 
-    prevBtn.addEventListener('click', () => rendition.prev());
-    nextBtn.addEventListener('click', () => rendition.next());
-    tocBtn.addEventListener('click', async () => {
-      const toc = await book.loaded.navigation;
-      if (!toc || !toc.toc) return alert('无目录信息');
-      const list = toc.toc.map((item, i) => `${i+1}. ${item.label}`).join('\n');
-      const pick = prompt('目录:\n' + list + '\n\n输入章节序号跳转');
-      const idx = parseInt(pick) - 1;
-      if (!isNaN(idx) && toc.toc[idx]) rendition.display(toc.toc[idx].href);
+    prevBtn.addEventListener('click', () => {
+      try { rendition.prev(); } catch (e) { console.warn(e); }
+    });
+    nextBtn.addEventListener('click', () => {
+      try { rendition.next(); } catch (e) { console.warn(e); }
+    });
+    tocBtn.addEventListener('click', () => {
+      tocList.style.display = tocList.style.display === 'none' ? 'block' : 'none';
+    });
+    night.addEventListener('change', () => {
+      if (!rendition) return;
+      if (night.checked) rendition.themes.select("night");
+      else rendition.themes.select(); // 恢复默认
     });
 
-    night.addEventListener('change', () => {
-      if (night.checked) rendition.themes.select("night");
-      else rendition.themes.select();
+    // 键盘翻页支持
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'ArrowLeft') prevBtn.click();
+      if (e.code === 'ArrowRight') nextBtn.click();
     });
+
+    // 更多调试：如果库没有加载，会在控制台看到 ePub 未定义
+    if (typeof ePub === 'undefined') {
+      setStatus('警告：epub.js 未加载（检查 CDN 或离线网络）', true);
+    }
   </script>
 </body>
 </html>
